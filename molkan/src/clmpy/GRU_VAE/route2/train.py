@@ -79,6 +79,7 @@ class Trainer():
         self.es.num_bad_steps = ckpt["num_bad_steps"]
         self.es.best = ckpt["es_best"]
         self.trainfrag = ckpt["trainfrag"]
+        self.lr_history = ckpt["lr_history"]
 
     def _save(self,path,step):
         self.optimizer.eval()
@@ -88,7 +89,8 @@ class Trainer():
             "step": step,
             "num_bad_steps": self.es.num_bad_steps,
             "es_best": self.es.best,
-            "trainfrag": self.trainfrag
+            "trainfrag": self.trainfrag,
+            "lr_history": self.lr_history
         }
         torch.save(ckpt,path)
 
