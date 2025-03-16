@@ -6,6 +6,8 @@ datahandler for clmpy
 Original script: clmpy[https://github.com/mizuno-group/clmpy] composed by Shumpei Nemoto
 """
 
+from typing import Iterator, Optional, TypeVar
+import argparse
 import os
 import sys
 import psutil
@@ -15,15 +17,18 @@ import random
 from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
+import math
 import psutil._common
 import gc
 import pandas as pd
 import torch
 from torch.utils.data import Dataset, Sampler
+import torch.distributed as dist
 from torch.utils.data.distributed import DistributedSampler
 from torch.nn.utils.rnn import pad_sequence
 
 
+# original script
 class BucketSampler(Sampler):
     def __init__(self,dataset,buckets=(20,150,10),shuffle=True,batch_size=512,drop_last=False):
         super().__init__(dataset)
@@ -70,6 +75,8 @@ class BucketSampler(Sampler):
     def __len__(self):
         return self.length
 
+
+# BucketSampler for DistributedDataParallel
 class DistributedBucketSampler(DistributedSampler):
     def __init__(self, dataset, buckets, epoch, shuffle=True, batch_size=512, drop_last=False) -> None:
         super().__init__(dataset, shuffle=True, seed=epoch)
@@ -135,6 +142,146 @@ class DistributedBucketSampler(DistributedSampler):
 
     def __len__(self):
         return self.length
+    
+# update: 250316
+# DistributedSampler for Continuous Pretraining (50% replay)
+_T_co = TypeVar("_T_co", covariant=True)
+class CPTDistributedSampler(Sampler[_T_co]):
+    """
+    Distributed Sampler for Continuous Pretraining (50% replay)
+    
+    Args:
+        args: argparse.Namespace
+        dataset: Dataset
+        phase: int
+        num_replicas: Optional[int] = None
+        rank: Optional[int] = None
+        shuffle: bool = True
+        seed: int = 0
+        drop_last: bool = False
+    """
+
+    def __init__(
+        self,
+        args: argparse.Namespace,
+        dataset: Dataset,
+        phase: int,
+        num_replicas: Optional[int] = None,
+        rank: Optional[int] = None,
+        shuffle: bool = True,
+        seed: int = 0,
+        drop_last: bool = False,
+    ) -> None:
+        if num_replicas is None:
+            if not dist.is_available():
+                raise RuntimeError("Requires distributed package to be available")
+            num_replicas = dist.get_world_size()
+        if rank is None:
+            if not dist.is_available():
+                raise RuntimeError("Requires distributed package to be available")
+            rank = dist.get_rank()
+        if rank >= num_replicas or rank < 0:
+            raise ValueError(
+                f"Invalid rank {rank}, rank should be in the interval [0, {num_replicas - 1}]"
+            )
+        self.args = args
+        self.dataset = dataset
+        self.phase = phase+1
+        self.num_replicas = num_replicas
+        self.rank = rank
+        self.epoch = 0
+        self.drop_last = drop_last
+        self.num_main_data = getattr(self.args, f"train_datanum{self.phase}")
+        if self.phase > 1:
+            self.num_replay_data = (self.num_main_data // 2) // self.pahse-1
+        else:
+            self.num_replay_data = 0
+        self.num_samples = self.num_main_data + (self.num_replay_data * (self.phase-1))
+        """
+        If the dataset length is evenly divisible by N of replicas, then there
+        is no need to drop any data, since the dataset will be split equally.
+        """
+        if self.drop_last and self.num_samples % self.num_replicas != 0:  # type: ignore[arg-type]
+            """
+            Split to nearest available length that is evenly divisible.
+            This is to ensure each rank receives the same amount of data when
+            using this Sampler.
+            """
+            self.num_samples = math.ceil(
+                (self.num_samples - self.num_replicas) / self.num_replicas  # type: ignore[arg-type]
+            )
+        else:
+            self.num_samples = math.ceil(self.num_samples / self.num_replicas)  # type: ignore[arg-type]
+        self.total_size = self.num_samples * self.num_replicas
+        self.shuffle = shuffle
+        self.seed = seed
+
+    def __iter__(self) -> Iterator[_T_co]:
+        if self.shuffle:
+            # deterministically shuffle based on epoch and seed
+            g = torch.Generator()
+            g.manual_seed(self.seed + self.epoch)
+            indices = []
+            for i in range(self.phase):
+                index_to_add = np.sum([getattr(self.args, f"train_datanum{j+1}") for j in range(i)])
+                if i+1 != self.phase:
+                    index = torch.randperm(n=getattr(self.args, f"train_datanum{i+1}"), generator=g)[:self.num_replay_data] + index_to_add
+                    indices += index.tolist()
+                else:
+                    index = torch.randperm(n=getattr(self.args, f"train_datanum{i+1}"), generator=g)[:self.num_main_data] + index_to_add
+                    indices += index.tolist()
+        else:
+            for i in range(self.phase):
+                index_to_add = np.sum([getattr(self.args, f"train_datanum{j+1}") for j in range(i)])
+                if i+1 != self.phase:
+                    index = torch.arange(getattr(self.args, f"train_datanum{i+1}"))[:self.num_replay_data] + index_to_add
+                    indices += index.tolist()
+                else:
+                    index = torch.arange(getattr(self.args, f"train_datanum{i+1}"))[:self.num_main_data] + index_to_add
+                    indices += index.tolist()
+        
+        random.seed(self.seed + self.epoch)
+        random.shuffle(indices)
+        
+        if not self.drop_last:
+            # add extra samples to make it evenly divisible
+            padding_size = self.total_size - len(indices)
+            if padding_size <= len(indices):
+                indices += indices[:padding_size]
+            else:
+                indices += (indices * math.ceil(padding_size / len(indices)))[
+                    :padding_size
+                ]
+        else:
+            # remove tail of data to make it evenly divisible.
+            indices = indices[: self.total_size]
+        assert len(indices) == self.total_size
+
+        # subsample
+        indices = indices[self.rank : self.total_size : self.num_replicas]
+        if len(indices) > self.num_samples:
+            indices = indices[:self.num_samples]
+        else:
+            indices += indices[: self.num_samples - len(indices)]
+
+        return iter(indices)
+
+    def __len__(self) -> int:
+        return self.num_samples
+
+    def set_epoch(self, epoch: int) -> None:
+        r"""
+        Set the epoch for this sampler.
+
+        When :attr:`shuffle=True`, this ensures all replicas
+        use a different random ordering for each epoch. Otherwise, the next iteration of this
+        sampler will yield the same ordering.
+
+        Args:
+            epoch (int): Epoch number.
+        """
+        self.epoch = epoch
+
 
 def read_smiles_from_csv(path):
     for chunk in pd.read_csv(path, usecols=["input", "output"], chunksize=100000):
