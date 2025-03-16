@@ -12,7 +12,7 @@ import pandas as pd
 import torch.nn as nn
 import torch.optim as optim
 from schedulefree import RAdamScheduleFree
-from torch.utils.data import Subset, DataLoader, DistributedSampler
+from torch.utils.data import Subset, DataLoader, DistributedSampler, ConcatDataset
 
 from .data_handler import *
 from .utils import EarlyStopping, warmup_schedule
@@ -74,6 +74,32 @@ def prep_3train_encoded_data(args):
                               worker_init_fn=worker_init_fn,
                               pin_memory=True)
     return train_loader1, train_loader2, train_loader3
+
+# update: 250316
+def prep_train_CPT(args, phase):
+    i = 1
+    while True:
+        attr_name1, attr_name2, attr_name3 = f"train_data{i}", f"train_datanum{i}", f"train_datadim{i}"
+        try:
+            sub = CLM_Dataset_v2(args.__dict__[attr_name1], args.__dict__[attr_name2], args.__dict__[attr_name3])
+            try:
+                trainset = ConcatDataset([trainset, sub])
+            except NameError:
+                trainset = sub
+            i += 1
+        except AttributeError:
+            break
+    print("load Sampler...")
+    ddpsampler = CPTDistributedSampler(args, trainset, phase)
+    print("load DataLoader...")
+    trainloader = DataLoader(trainset,
+                             sampler=ddpsampler,
+                             collate_fn=collate,
+                             batch_size=args.batch_size,
+                             num_workers=args.num_workers,
+                             worker_init_fn=worker_init_fn,
+                             pin_memory=True)
+    return trainloader
 
 def prep_valid_data(args):
     validset = CLM_Dataset(args.valid_data,args.token, os.path.join("/work/gd43/a97009/MolKAN/molkan/data/pubchem", "110m_valid.npy"), args.SFL)
