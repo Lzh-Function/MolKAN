@@ -27,6 +27,7 @@ def plot_loss(train,valid,valid_steps,train2=[],valid2=[],dir_name="",plot_name=
     loss1 = ax1.plot(train,color="blue",label="train_rec")
     ax1.set_xlabel("step")
     ax1.set_ylabel("reconstruction loss")
+    ax1.set_yscale("log")
     ax1.grid()
     ax1.spines["right"].set_visible(False)
     ax1.spines["top"].set_visible(False)
@@ -35,6 +36,7 @@ def plot_loss(train,valid,valid_steps,train2=[],valid2=[],dir_name="",plot_name=
         ax3 = ax1.twinx()
         loss3 = ax3.plot(train2,color="skyblue",label="train_KL")
         ax3.set_ylabel("KL loss")
+        ax3.set_yscale("log")
         h3, l3 = ax3.get_legend_handles_labels()
         ax1.legend(h1+h3,l1+l3)
 
@@ -42,6 +44,7 @@ def plot_loss(train,valid,valid_steps,train2=[],valid2=[],dir_name="",plot_name=
     loss2 = ax2.plot(valid,color="orange",label="valid_rec")
     ax2.set_xlabel(f"step * {valid_steps}")
     ax2.set_ylabel("reconstruction loss")
+    ax2.set_yscale("log")
     ax2.grid()
     ax2.spines["right"].set_visible(False)
     ax2.spines["top"].set_visible(False)
@@ -50,12 +53,14 @@ def plot_loss(train,valid,valid_steps,train2=[],valid2=[],dir_name="",plot_name=
         ax4 = ax2.twinx()
         loss4 = ax4.plot(valid2,color="yellow",label="valid_KL")
         ax4.set_ylabel("KL loss")
+        ax4.set_yscale("log")
         h4, l4 = ax4.get_legend_handles_labels()
         ax2.legend(h2+h4,l2+l4)
     if plot_name is None:
         plt.savefig(os.path.join(dir_name,"loss.png"),bbox_inches="tight")
     else:
         plt.savefig(os.path.join(dir_name,f"{plot_name}_loss.png"),bbox_inches="tight")
+    plt.close()
 
 
 def generate_uniform_random(dim,n,low=-1,high=1):
