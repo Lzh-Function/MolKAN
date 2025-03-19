@@ -193,7 +193,7 @@ class CPTDistributedSampler(Sampler[_T_co]):
         self.drop_last = drop_last
         self.num_main_data = getattr(self.args, f"train_datanum{self.phase}")
         if self.phase > 1:
-            self.num_replay_data = (self.num_main_data // 2) // self.pahse-1
+            self.num_replay_data = (self.num_main_data // 2) // (self.phase-1)
         else:
             self.num_replay_data = 0
         self.num_samples = self.num_main_data + (self.num_replay_data * (self.phase-1))
@@ -223,7 +223,7 @@ class CPTDistributedSampler(Sampler[_T_co]):
             g.manual_seed(self.seed + self.epoch)
             indices = []
             for i in range(self.phase):
-                index_to_add = np.sum([getattr(self.args, f"train_datanum{j+1}") for j in range(i)])
+                index_to_add = int(np.sum([getattr(self.args, f"train_datanum{j+1}") for j in range(i)]))
                 if i+1 != self.phase:
                     index = torch.randperm(n=getattr(self.args, f"train_datanum{i+1}"), generator=g)[:self.num_replay_data] + index_to_add
                     indices += index.tolist()
@@ -231,8 +231,9 @@ class CPTDistributedSampler(Sampler[_T_co]):
                     index = torch.randperm(n=getattr(self.args, f"train_datanum{i+1}"), generator=g)[:self.num_main_data] + index_to_add
                     indices += index.tolist()
         else:
+            indices = []
             for i in range(self.phase):
-                index_to_add = np.sum([getattr(self.args, f"train_datanum{j+1}") for j in range(i)])
+                index_to_add = int(np.sum([getattr(self.args, f"train_datanum{j+1}") for j in range(i)]))
                 if i+1 != self.phase:
                     index = torch.arange(getattr(self.args, f"train_datanum{i+1}"))[:self.num_replay_data] + index_to_add
                     indices += index.tolist()
@@ -249,9 +250,7 @@ class CPTDistributedSampler(Sampler[_T_co]):
             if padding_size <= len(indices):
                 indices += indices[:padding_size]
             else:
-                indices += (indices * math.ceil(padding_size / len(indices)))[
-                    :padding_size
-                ]
+                indices += (indices * math.ceil(padding_size / len(indices)))[:padding_size]
         else:
             # remove tail of data to make it evenly divisible.
             indices = indices[: self.total_size]
@@ -261,9 +260,9 @@ class CPTDistributedSampler(Sampler[_T_co]):
         indices = indices[self.rank : self.total_size : self.num_replicas]
         if len(indices) > self.num_samples:
             indices = indices[:self.num_samples]
-        else:
+        elif len(indices) < self.num_samples:
             indices += indices[: self.num_samples - len(indices)]
-
+        
         return iter(indices)
 
     def __len__(self) -> int:
