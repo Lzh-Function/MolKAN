@@ -87,7 +87,7 @@ def prep_train_CPT(args, phase):
             except NameError:
                 trainset = sub
             i += 1
-        except AttributeError:
+        except KeyError:
             break
     print("load Sampler...")
     ddpsampler = CPTDistributedSampler(args, trainset, phase)
@@ -160,6 +160,35 @@ def prep_valid_encoded_data_v2(args):
                       num_workers=args.num_workers,
                       pin_memory=True)
     return valid1, valid2, valid3, full
+
+# 250317 4 phase CPT
+def prep_valid_encoded_data_v3(args):
+    validset = CLM_Dataset_v2(args.valid_data, args.valid_datanum, args.valid_datadim)
+    valid1 = DataLoader(Subset(validset, range(2500)),
+                              shuffle=False,
+                              collate_fn=collate,
+                              batch_size=args.batch_size,
+                              num_workers=args.num_workers,
+                              pin_memory=True)
+    valid2 = DataLoader(Subset(validset, range(5000)),
+                              shuffle=False,
+                              collate_fn=collate,
+                              batch_size=args.batch_size,
+                              num_workers=args.num_workers,
+                              pin_memory=True)
+    valid3 = DataLoader(Subset(validset, range(7500)),
+                              shuffle=False,
+                              collate_fn=collate,
+                              batch_size=args.batch_size,
+                              num_workers=args.num_workers,
+                              pin_memory=True)
+    valid4 = DataLoader(validset,
+                      shuffle=False,
+                      collate_fn=collate,
+                      batch_size=args.batch_size,
+                      num_workers=args.num_workers,
+                      pin_memory=True)
+    return valid1, valid2, valid3, valid4
 
 def prep_encode_data(args,smiles):
     dataset = Encoder_Dataset(smiles,args)
