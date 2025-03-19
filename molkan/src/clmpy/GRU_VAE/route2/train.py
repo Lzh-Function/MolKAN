@@ -59,7 +59,7 @@ class Trainer():
     ):
         self.logger = logger
         self.model = model
-        self.valid1, self.valid2, self.valid3, _ = prep_valid_encoded_data_v2(args)
+        self.valid1, self.valid2, self.valid3, self.valid4 = prep_valid_encoded_data_v3(args)
         self.criteria = criteria
         self.optimizer = optimizer
         self.es = es
@@ -78,10 +78,14 @@ class Trainer():
         self.steps_run = ckpt["step"]
         self.es.num_bad_steps = ckpt["num_bad_steps"]
         self.es.best = ckpt["es_best"]
-        self.trainfrag = ckpt["trainfrag"]
+        self.phase = ckpt["phase"]
+        self.train_loss1 = ckpt["train_loss1"]
+        self.train_loss2 = ckpt["train_loss2"]
+        self.valid_loss1 = ckpt["valid_loss1"]
+        self.valid_loss2 = ckpt["valid_loss2"]
         self.lr_history = ckpt["lr_history"]
 
-    def _save(self,path,step):
+    def _save(self,path,step,phaseend=False):
         self.optimizer.eval()
         ckpt = {
             "model": self.model.state_dict(),
@@ -89,7 +93,11 @@ class Trainer():
             "step": step,
             "num_bad_steps": self.es.num_bad_steps,
             "es_best": self.es.best,
-            "trainfrag": self.trainfrag,
+            "phase": self.phase if not phaseend else self.phase+1,
+            "train_loss1": self.train_loss1,
+            "train_loss2": self.train_loss2,
+            "valid_loss1": self.valid_loss1,
+            "valid_loss2": self.valid_loss2,
             "lr_history": self.lr_history
         }
         torch.save(ckpt,path)
@@ -118,32 +126,47 @@ class Trainer():
             l = self.criteria(out.transpose(-2,-1),target[1:,:]) / source.shape[1]
             l2 = KLLoss(mu,log_var) / source.shape[1]
         return l.item(), l2.item()
-
-    def _train(self,args,train_data,trainfrag):
-        lt, lv, lt2, lv2 = [], [], [], []
+    
+    # 250317: 4 phase CPT
+    def _train(self,args,train_data,phase):
+        assert phase <= 3, f"phase number:{phase} out of range!"
         end = False
         for datas in train_data:
             self.steps_run += 1
             l_t, l_t2 = self._train_batch(*datas,args.device)
-            lt.append(l_t)
-            lt2.append(l_t2)
+            self.train_loss1.append(l_t)
+            self.train_loss2.append(l_t2)
             if self.steps_run % args.valid_step_range == 0:
                 l = []
-                if trainfrag == 0:
+                l1 = []
+                l2 = []
+                if phase == 0:
                     for v,w in self.valid1:
                         l_v, l_v2 = self._valid_batch(v,w,args.device)
                         l.append(l_v + l_v2 * self.beta)
-                elif trainfrag == 1:
+                        l1.append(l_v)
+                        l2.append(l_v2)
+                elif phase == 1:
                     for v,w in self.valid2:
                         l_v, l_v2 = self._valid_batch(v,w,args.device)
                         l.append(l_v + l_v2 * self.beta)
-                elif trainfrag == 2:
+                        l1.append(l_v)
+                        l2.append(l_v2)
+                elif phase == 2:
                     for v,w in self.valid3:
                         l_v, l_v2 = self._valid_batch(v,w,args.device)
                         l.append(l_v + l_v2 * self.beta)
+                        l1.append(l_v)
+                        l2.append(l_v2)
+                elif phase == 3:
+                    for v,w in self.valid4:
+                        l_v, l_v2 = self._valid_batch(v,w,args.device)
+                        l.append(l_v + l_v2 * self.beta)
+                        l1.append(l_v)
+                        l2.append(l_v2)
                 l = np.mean(l)
-                lv.append(l_v)
-                lv2.append(l_v2)
+                self.valid_loss1.append(np.mean(l1))
+                self.valid_loss2.append(np.mean(l2))
 
                 # 全ノードの検証ロスを集約
                 l_v_tensor = torch.tensor([l], dtype=torch.float32, requires_grad=False).to(args.device)
@@ -173,49 +196,43 @@ class Trainer():
                     self.logger.info(f"Reaching train steps limit: {args.steps}. Train finished.")
                 torch.distributed.barrier()
                 break
-        return lt, lv, lt2, lv2, end
+        return end
 
     def train(self,args):
         end = False
-        lt, lv, lt2, lv2 = [], [], [], []
-        train_data1, train_data2, train_data3 = prep_3train_encoded_data(args)
+        if not hasattr(self, "train_loss1"):
+            self.train_loss1 = []
+            self.train_loss2 = []
+            self.valid_loss1 = []
+            self.valid_loss2 = []
         if args.global_rank == 0:
             self.logger.info("train start...")
-        if not hasattr(self, "trainfrag"):
-            for trainfrag, train_data in enumerate([train_data1, train_data2, train_data3]):
-                self.trainfrag = trainfrag
+        if not hasattr(self, "phase"):
+            for phase in range(4):
+                self.phase = phase
+                train_data = prep_train_CPT(args, phase)
                 while end == False:
-                    l_t, l_v, l_t2, l_v2, end = self._train(args,train_data, trainfrag)
-                    lt.extend(l_t)
-                    lv.extend(l_v)
-                    lt2.extend(l_t2)
-                    lv2.extend(l_v2)
+                    end = self._train(args,train_data, phase)
                 if args.global_rank == 0:
-                    self.logger.info(f">>> train fragment {trainfrag+1} finished.")
-                    torch.save(self.best_model.state_dict(),os.path.join(args.experiment_dir,f"best_model_train{trainfrag+1}_maxlr_{args.max_lr}.pt"))
+                    self.logger.info(f">>> train phase {phase+1} finished.")
+                    torch.save(self.best_model.state_dict(),os.path.join(args.experiment_dir,f"best_model_train{phase+1}_maxlr_{args.max_lr}.pt"))
                 end = False
-                #self.es.num_bad_steps = 0
-                #self.es.best = None
                 _, self.optimizer, self.es = load_train_objs(args, self.model)
+                self._save(self.ckpt_path,self.steps_run, phaseend=True)
         else:
-            for trainfrag in range(self.trainfrag, 3):
-                train_data = [train_data1, train_data2, train_data3][trainfrag]
-                self.trainfrag = trainfrag
+            for phase in range(self.phase, 4):
+                train_data = prep_train_CPT(args, phase)
+                self.phase = phase
                 while end == False:
-                    l_t, l_v, l_t2, l_v2, end = self._train(args,train_data, trainfrag)
-                    lt.extend(l_t)
-                    lv.extend(l_v)
-                    lt2.extend(l_t2)
-                    lv2.extend(l_v2)
+                    end = self._train(args,train_data, phase)
                 if args.global_rank == 0:
-                    self.logger.info(f">>> train fragment {trainfrag+1} finished.")
-                    torch.save(self.best_model.state_dict(),os.path.join(args.experiment_dir,f"best_model_train{trainfrag+1}_maxlr_{args.max_lr}.pt"))
+                    self.logger.info(f">>> train phase {phase+1} finished.")
+                    torch.save(self.best_model.state_dict(),os.path.join(args.experiment_dir,f"best_model_train{phase+1}_maxlr_{args.max_lr}.pt"))
                 end = False
-                #self.es.num_bad_steps = 0
-                #self.es.best = None
                 _, self.optimizer, self.es = load_train_objs(args, self.model)
-        
-        return lt, lv, lt2, lv2
+                self._save(self.ckpt_path,self.steps_run, phaseend=True)
+                
+        return self.train_loss1, self.valid_loss1, self.train_loss2, self.valid_loss2, self.lr_history
 
 def main():
     ts = time.perf_counter()
@@ -240,28 +257,28 @@ def main():
         trainer = Trainer(args, model,criteria,optimizer, es, logger)
     else:
         trainer = Trainer(args, model,criteria,optimizer, es)
-    loss_t, loss_v, loss_t2, loss_v2 = trainer.train(args)
+    loss_t, loss_v, loss_t2, loss_v2, lr_history = trainer.train(args)
     if args.global_rank == 0:
         logger.info("saving results...")
         os.remove(trainer.ckpt_path)
         if args.plot:
             plot_loss(loss_t,loss_v,args.valid_step_range, loss_t2,loss_v2,dir_name=args.experiment_dir, plot_name=f"maxlr_{args.max_lr}")
             # HACK inscpect learning rate
-            plt.plot(Trainer.lr_history)
+            plt.plot(lr_history)
             plt.xlabel("step")
             plt.ylabel("lr")
             plt.yscale("log")
             plt.title("RAdamScheduleFree lr-history")
             plt.savefig(os.path.join(args.experiment_dir, "lr_history.png"), dpi=300, bbox_inches="tight")
-        for trainfrag in range(1, 4):
-            args.model_path = os.path.join(args.experiment_dir,f"best_model_train{trainfrag}_maxlr_{args.max_lr}.pt")
-            logger.info(f"evaluating with best model {trainfrag}...")
+        for phase in range(1, 5):
+            args.model_path = os.path.join(args.experiment_dir,f"best_model_train{phase}_maxlr_{args.max_lr}.pt")
+            logger.info(f"evaluating with best model {phase}...")
             model = GRUVAE(args)
             results, accuracy, partial_accuracy = Evaluator(model, args).evaluate()
             results = results.sort_values("ans_tokenlength")
-            results.to_csv(os.path.join(args.experiment_dir,f"evaluate_result_train{trainfrag}_maxlr_{args.max_lr}.csv"))
-            logger.info(f"best model {trainfrag} perfect accuracy: {accuracy}")
-            logger.info(f"best model {trainfrag} partial accuracy: {partial_accuracy}") 
+            results.to_csv(os.path.join(args.experiment_dir,f"evaluate_result_train{phase}_maxlr_{args.max_lr}.csv"))
+            logger.info(f"best model {phase} perfect accuracy: {accuracy}")
+            logger.info(f"best model {phase} partial accuracy: {partial_accuracy}") 
         logger.info(">>> experiment finished.")
     torch.distributed.barrier()
     torch.distributed.destroy_process_group()

@@ -113,7 +113,7 @@ class Evaluator():
     def evaluate(self):
         self.model.eval()
         res = []
-        t1, t2 , test_data = prep_valid_encoded_data(self.args)
+        _, __, ___, test_data = prep_valid_encoded_data_v3(self.args)
         partial_accuracy = 0
         with torch.no_grad():
             for source, target in test_data:
@@ -153,11 +153,13 @@ def main():
     model = GRUVAE(args)
     evaluator = Evaluator(model,args)
     results, accuracy, partial_accuracy = evaluator.evaluate()
-    results = results.sort_values("ans_tokenlength")
+    # results = results.sort_values("ans_tokenlength")
     results.to_csv(os.path.join(args.experiment_dir,f"evaluate_result_maxlr_{args.max_lr}.csv"))
     logger.info(f"best model perfect accuracy: {accuracy}")
+    phase_datanum = int(args.valid_datanum / args.phase)
+    for i in range(1, args.phase+1):
+        logger.info(f"best model phase{i}-data perfect accuracy: {np.sum(results[phase_datanum*(i-1):phase_datanum*i] == True) / phase_datanum}")
     logger.info(f"best model partial accuracy: {partial_accuracy}")
-   
 
 if __name__ == "__main__":
     main()
